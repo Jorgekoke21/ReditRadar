@@ -102,7 +102,7 @@ Ver `docs/rls.md` y `docs/authentication.md` para el diseño completo, con evide
 |---|---|---|---|---|---|---|
 | Demo funciona sin llamadas externas | Completo | Pipeline de análisis real ejecutado con **todas** las conexiones de socket a IPs no privadas bloqueadas a nivel de `socket.socket.connect`; completó con éxito (`score_total=98`) | `backend/audit_no_network.py` | `docker compose exec backend python audit_no_network.py` | Prueba a nivel de socket, no de paquete de red completo (no hay captura pcap) | Ninguna |
 | Manual funciona sin llamadas externas | Completo | Mismo script, mismo pipeline (`_analyze_one`), usado por manual/CSV | `backend/audit_no_network.py` | Igual que arriba | Igual que arriba | Ninguna |
-| `REDDIT_API_ENABLED=false` impide cualquier llamada a Reddit | Completo para el adaptador; el job que lo usaría es un stub (ver §5) | Las 3 funciones públicas de `reddit_client.py` invocadas directamente y las 3 lanzan `RedditIntegrationDisabled` antes de tocar la red | `backend/app/services/reddit_client.py` | Invocación directa vía `docker compose exec` + `test_jobs.py` (2 tests) | Ninguna | Ninguna |
+| `REDDIT_API_ENABLED=false` impide cualquier llamada a Reddit | Completo; los jobs que lo usan están implementados y también respetan la bandera (ver §5) | Las 3 funciones públicas de `reddit_client.py` invocadas directamente y las 3 lanzan `RedditIntegrationDisabled` antes de tocar la red | `backend/app/services/reddit_client.py` | Invocación directa vía `docker compose exec` + `test_jobs.py` (2 tests) | Ninguna | Ninguna |
 | `AI_ANALYSIS_ENABLED=false` usa realmente el analizador por reglas | Completo | `get_analyzer()` devuelve `RulesConversationAnalyzer` por defecto y también cuando está activado sin API key; con clave real, devuelve `LLMConversationAnalyzer` que **sí intenta una llamada HTTP real** (confirmado: `401 Unauthorized` de `api.openai.com`, prueba de que no es un stub) | `backend/app/services/analyzer.py` | Script interactivo de 3 escenarios, ver comando en el informe final | Ninguna | Ninguna |
 | `EMAIL_PROVIDER=console` no declara correos como enviados | Completo | `ConsoleEmailProvider.send()` devuelve `False` siempre; verificado en vivo y en `alerts.spec.ts` | `backend/app/services/email_provider.py` | Invocación directa + `alerts.spec.ts::send-test email...NOT externally sent` | Ninguna | Ninguna |
 | Falta de credenciales no rompe el programa | Completo | `.env` real del proyecto tiene `SUPABASE_*`, `REDDIT_CLIENT_*`, `AI_API_KEY`, `SMTP_HOST`, `RESEND_API_KEY` todos vacíos; `/api/health` y `/api/settings/integrations` responden con normalidad; 42+29 tests pasan bajo esta misma configuración | `.env`, `/api/settings/integrations` | `curl` en vivo + toda la suite de tests | Ninguna | Ninguna |
@@ -161,12 +161,16 @@ Ver tabla de clasificación completa en `docs/reddit-compliance.md` (sección "C
 | Puerta de activación (`RedditIntegrationDisabled` en las 3 funciones públicas) | Implementada y probada |
 | `build_authorize_url` | Implementada, no probada contra Reddit real |
 | `exchange_code_for_token` | Implementada, no probada contra Reddit real |
-| `fetch_new_posts` (listing + backoff) | Implementada, no probada contra Reddit real, **no conectada a ningún job** |
-| Job `fetch_reddit_conversations` | **Stub** — no llama a `fetch_new_posts` ni con la bandera activa |
-| Job `sync_deleted_reddit_content` | **Stub** — no comprueba nada contra Reddit ni con la bandera activa |
+| `fetch_new_posts` / `fetch_new_posts_page` (listing + paginación + backoff) | Implementada y probada con Fake, no probada contra Reddit real |
+| Job `fetch_reddit_conversations` | Implementado y probado con Fake, no probado contra Reddit real — **ya no es un stub** (corregido en la fase de automatización del 2026-08-27; esta fila decía "Stub" y era obsoleta) |
+| Job `sync_deleted_reddit_content` | Implementado y probado con Fake, no probado contra Reddit real — **ya no es un stub** (misma corrección) |
+| `refresh_access_token` + refresco proactivo antes de cada job | Implementado y probado con Fake, no probado contra Reddit real (fase puente OAuth) |
+| Callback OAuth alcanzable desde el navegador (`/reddit/callback` en el frontend → `POST /api/reddit/callback` autenticado) | Implementado y probado con Fake/E2E, no probado contra Reddit real |
+| `state` OAuth ligado a la cuenta, con expiración y un solo uso | Implementado y probado |
+| Botón Conectar/Desconectar Reddit en Configuración | Implementado y probado con E2E |
 | Cifrado de tokens OAuth (`crypto.py`) | Implementada y probada (`test_token_encryption_roundtrip_never_stores_plaintext`) |
 | Backoff ante 429/5xx | Implementada, no probada contra Reddit real |
-| Respetar cabeceras `x-ratelimit-*` proactivamente | **No implementada** (una versión anterior de la documentación afirmaba lo contrario — corregido) |
+| Respetar cabeceras `x-ratelimit-*` | Implementada: se leen y persisten por comunidad (`reddit_rate_*`) y se exponen en diagnósticos; el backoff reacciona a 429/5xx/`retry-after`. No probada contra Reddit real |
 | Scopes de solo lectura | Implementada |
 | `GET /api/reddit/connect` bloqueado si desactivado | Implementada y probada (403 confirmado) |
 

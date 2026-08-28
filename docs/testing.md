@@ -2,14 +2,14 @@
 
 Last audited: 2026-08-27 (see `docs/acceptance-audit.md` for the full matrix). The backend result below is from the isolated SQLite/FakeReddit run; the full Docker stack and browser suite were not rerun in this phase because host port 5432 was occupied by another project.
 
-## Backend (81 tests potenciales; ultima ejecucion local: 72 passed, 9 skipped)
+## Backend (ultima ejecucion completa: 107 passed, 0 failed, 0 skipped)
 
 ```bash
 cd backend
 docker compose run --rm --no-deps backend pytest -q
 ```
 
-Resultado de esta fase: **72 passed, 9 skipped, 0 failed**. Los 9 omitidos requieren el servicio Postgres/RLS y no se ejecutan en la invocacion aislada con `--no-deps`. Para ejecutar los checks de Postgres contra la base real de Compose: `docker compose run --rm backend pytest tests/test_rls_postgres.py -v`.
+Resultado de la ultima ejecucion, dentro de la red de Compose (`docker compose exec -T backend python -m pytest -q`): **107 passed, 0 failed, 0 skipped**. Ejecutada fuera de esa red, los tests de `tests/test_rls_postgres.py` se omiten solos (no resuelven el host `db`), que es la unica causa legitima de skips en esta suite. Para ejecutar los checks de Postgres contra la base real de Compose: `docker compose run --rm backend pytest tests/test_rls_postgres.py -v`.
 
 Corren contra un SQLite de archivo desechable (no contra el Postgres de desarrollo) — todos los modelos usan tipos
 portables (`Uuid`, `Enum(native_enum=False)`, `JSON`) precisamente para que esto sea posible sin depender de un
@@ -36,15 +36,15 @@ de cada test).
 `docs/acceptance-audit.md`), RLS **sí tiene efecto real** hoy, verificado por `test_rls_postgres.py` contra
 Postgres real, no por inferencia. Detalle completo del diseño de roles y políticas en `docs/rls.md`.
 
-## Frontend E2E (37 tests, Playwright Test, contra el stack real)
+## Frontend E2E (42 tests, Playwright Test, contra el stack real)
 
 ```bash
 cd frontend
 npx playwright test
 ```
 
-Ultima ejecucion completa registrada antes de esta fase: **35 passed**, 0 failed, 0 skipped.
-Esta fase añade dos pruebas en reddit-automation.spec.ts; la ejecucion de los 37 tests quedo pendiente por el conflicto de puerto 5432.
+Ultima ejecucion completa: **42 passed**, 0 failed, 0 skipped.
+La fase del puente OAuth añade `reddit-oauth.spec.ts` (5 pruebas): conectar, desconectar, autorizacion cancelada, state rechazado y ausencia del boton mientras `REDDIT_API_ENABLED=false`. Reddit nunca se contacta: la pantalla de consentimiento y los dos endpoints se sirven con un interceptor de rutas de Playwright.
 
 | Archivo | Qué verifica |
 |---|---|

@@ -1,9 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
-import { Download } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Link2, Unlink } from "lucide-react";
+import { useState } from "react";
 import LoadingState from "../components/LoadingState";
 import PageHeader from "../components/PageHeader";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useToast } from "../lib/toast";
 import type { Community, ConversationListItem, IntegrationsStatus, Topic } from "../types";
 
 function StatusRow({ label, value, tone }: { label: string; value: string; tone: "on" | "off" | "neutral" }) {
@@ -19,9 +21,43 @@ function StatusRow({ label, value, tone }: { label: string; value: string; tone:
   );
 }
 
+const REDDIT_STATE_KEY = "radarin_reddit_oauth_state";
+
 export default function Settings() {
   const { profile } = useAuth();
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
   const query = useQuery({ queryKey: ["integrations"], queryFn: () => api.get<IntegrationsStatus>("/api/settings/integrations") });
+
+  async function handleConnectReddit() {
+    setBusy(true);
+    try {
+      const { authorize_url, state } = await api.get<{ authorize_url: string; state: string }>(
+        "/api/reddit/connect"
+      );
+      // Kept so the callback page can compare before spending the code; the
+      // backend validates the same state against its own record regardless.
+      sessionStorage.setItem(REDDIT_STATE_KEY, state);
+      window.location.href = authorize_url;
+    } catch (err) {
+      setBusy(false);
+      toast.show(err instanceof Error ? err.message : "No se pudo iniciar la conexión con Reddit");
+    }
+  }
+
+  async function handleDisconnectReddit() {
+    setBusy(true);
+    try {
+      await api.delete("/api/reddit/connection");
+      await queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      toast.show("Reddit desconectado");
+    } catch (err) {
+      toast.show(err instanceof Error ? err.message : "No se pudo desconectar Reddit");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleExport() {
     const [conversations, communities, topics] = await Promise.all([
@@ -52,9 +88,43 @@ export default function Settings() {
           <h2 className="mb-1 text-sm font-semibold text-primary">Integraciones</h2>
           <StatusRow
             label="API oficial de Reddit"
-            value={s.reddit_api_enabled ? (s.reddit_connected ? "Activa y conectada" : "Activada, sin conectar") : "Desactivada"}
+            value={
+              s.reddit_api_enabled
+                ? s.reddit_connected
+                  ? "Reddit conectado"
+                  : "Reddit no conectado"
+                : "Desactivada"
+            }
             tone={s.reddit_api_enabled && s.reddit_connected ? "on" : "off"}
           />
+          {s.reddit_api_enabled && (
+            <div className="pt-3">
+              {s.reddit_connected ? (
+                <button
+                  onClick={handleDisconnectReddit}
+                  disabled={busy}
+                  data-testid="reddit-disconnect"
+                  className="flex items-center gap-1.5 rounded-lg border border-primary/20 px-3.5 py-2 text-sm font-medium text-primary hover:bg-primary/5 disabled:opacity-50"
+                >
+                  <Unlink size={15} aria-hidden="true" />
+                  Desconectar
+                </button>
+              ) : (
+                <button
+                  onClick={handleConnectReddit}
+                  disabled={busy}
+                  data-testid="reddit-connect"
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+                >
+                  <Link2 size={15} aria-hidden="true" />
+                  Conectar Reddit
+                </button>
+              )}
+              <p className="mt-2 text-xs leading-relaxed text-primary/50">
+                Acceso de solo lectura. ReditRadar nunca publica, vota ni envía mensajes en tu nombre.
+              </p>
+            </div>
+          )}
           <StatusRow
             label="Análisis con IA"
             value={s.ai_analysis_enabled ? `Activo (${s.ai_provider})` : "Desactivado — usando reglas deterministas"}

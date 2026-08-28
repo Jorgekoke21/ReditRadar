@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_account_id
@@ -30,6 +30,21 @@ async def create_community(
     account_id: uuid.UUID = Depends(get_current_account_id),
     session: AsyncSession = Depends(get_db),
 ):
+    # CommunityIn canonicalizes the name, so "SaaS", "r/SaaS" and "/r/saas"
+    # all collide here rather than creating near-duplicate watch entries.
+    # Checked explicitly so the caller gets a 409 instead of the raw
+    # IntegrityError from uq_community_account_name.
+    existing = (
+        await session.execute(
+            select(Community).where(
+                Community.account_id == account_id,
+                func.lower(Community.name) == body.name.lower(),
+            )
+        )
+    ).scalars().first()
+    if existing:
+        raise HTTPException(409, f"Community 'r/{existing.name}' is already on the watch list")
+
     community = Community(account_id=account_id, **body.model_dump())
     session.add(community)
     await session.commit()

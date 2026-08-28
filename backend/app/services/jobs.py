@@ -39,9 +39,9 @@ from app.services.email_provider import get_email_provider
 from app.services.email_templates import DigestItem, build_daily_digest, build_urgent_alert, build_weekly_digest
 from app.services.initial_filter import DEFAULT_MAX_AGE_HOURS, run_initial_filter
 from app.services.scoring import ScoreInput, compute_score
-from app.services.crypto import decrypt_token
+from app.services.crypto import decrypt_token, encrypt_token
 from app.services.dedupe import compute_dedupe_hash, normalize_url
-from app.services.text_utils import normalize
+from app.services.text_utils import normalize, normalize_subreddit, subreddits_match
 
 logger = logging.getLogger("radarin.jobs")
 
@@ -137,6 +137,73 @@ async def _with_job_lock(session: AsyncSession, job_name: str, fn):
 # ---------------------------------------------------------------------------
 # 1. fetch_reddit_conversations
 # ---------------------------------------------------------------------------
+TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+
+async def _ensure_fresh_access_token(session: AsyncSession, settings: Settings, connection, adapter) -> str:
+    """Return a usable access token for `connection`, refreshing it if needed.
+
+    Reddit access tokens expire in an hour, so a long-running worker that only
+    ever decrypts the stored token would ingest for one hour and then fail
+    every tick forever. Refreshing when the token is expired or within
+    TOKEN_REFRESH_MARGIN_SECONDS of expiry keeps ingestion sustained without
+    a refresh on every single tick.
+
+    A connection with no recorded expiry is treated as still valid: rows
+    created before this column was populated should not be forced through a
+    refresh they may not need.
+
+    Raises RedditTokenRefreshError when the token cannot be renewed. Callers
+    record that against the account and move on — the worker stays alive and
+    the next scheduled run tries again.
+    """
+    access_token = decrypt_token(settings, connection.access_token_encrypted)
+    expires_at = _as_aware(connection.token_expires_at)
+    if expires_at is not None:
+        margin = timedelta(seconds=TOKEN_REFRESH_MARGIN_SECONDS)
+        needs_refresh = expires_at - margin <= datetime.now(timezone.utc)
+    else:
+        needs_refresh = not access_token
+
+    if not needs_refresh:
+        return access_token
+
+    refresh_token = decrypt_token(settings, connection.refresh_token_encrypted) if connection.refresh_token_encrypted else ""
+    logger.info(
+        "reddit_token_refresh_start account_id=%s expires_at=%s", connection.account_id, expires_at
+    )
+    # Test adapters may only implement the listing surface; fall back to the
+    # real client, which is itself gated by REDDIT_API_ENABLED.
+    refresh = getattr(adapter, "refresh_access_token", reddit_client.refresh_access_token)
+    payload = await refresh(settings, refresh_token)
+
+    new_access = payload.get("access_token") or ""
+    if not new_access:
+        raise reddit_client.RedditTokenRefreshError("Reddit token refresh returned no access_token")
+
+    connection.access_token_encrypted = encrypt_token(settings, new_access)
+    # Reddit omits refresh_token on most refreshes; overwriting with "" there
+    # would strand the connection with no way back.
+    rotated = payload.get("refresh_token")
+    if rotated:
+        connection.refresh_token_encrypted = encrypt_token(settings, rotated)
+    expires_in = payload.get("expires_in")
+    try:
+        lifetime = int(expires_in) if expires_in is not None else 3600
+    except (TypeError, ValueError):
+        lifetime = 3600
+    connection.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=lifetime)
+    if payload.get("scope"):
+        connection.scopes = payload["scope"]
+    await session.commit()
+    await _set_account_context(session, connection.account_id)
+    logger.info(
+        "reddit_token_refreshed account_id=%s expires_at=%s rotated_refresh_token=%s",
+        connection.account_id, connection.token_expires_at, bool(rotated),
+    )
+    return new_access
+
+
 async def _watch_age_by_community(session: AsyncSession, account_id, default: int) -> dict:
     rows = (
         await session.execute(
@@ -200,6 +267,7 @@ async def run_fetch_reddit_conversations(
             "saved": 0,
             "recommended": 0,
             "errors_by_community": 0,
+            "token_refresh_failures": 0,
             "rate_remaining": None,
             "rate_used": None,
             "rate_reset_seconds": None,
@@ -228,13 +296,25 @@ async def run_fetch_reddit_conversations(
                 logger.error("reddit_account_error account_id=%s reason=oauth_connection_missing", account_id)
                 continue
             try:
-                access_token = decrypt_token(settings, connection.access_token_encrypted)
+                access_token = await _ensure_fresh_access_token(session, settings, connection, adapter)
             except Exception as exc:
                 errors += 1
-                logger.error("reddit_account_error account_id=%s reason=oauth_token_unreadable type=%s", account_id, type(exc).__name__)
+                metrics["token_refresh_failures"] += 1
+                await session.rollback()
+                await _set_account_context(session, account_id)
+                # type/message only — never the token itself.
+                logger.error(
+                    "reddit_account_error account_id=%s reason=oauth_token_unusable type=%s detail=%s",
+                    account_id, type(exc).__name__, str(exc)[:200],
+                )
                 continue
             ages = await _watch_age_by_community(session, account_id, settings.reddit_default_max_age_hours)
-            community_specs = [(c.id, c.name, c.primary_language) for c in communities]
+            # The listing path is /r/{name}/new, so the stored name has to be
+            # canonical before it is used as a URL segment: a row still holding
+            # "r/agency" would request /r/r/agency/new and 404 every cycle.
+            community_specs = [
+                (c.id, normalize_subreddit(c.name), c.primary_language) for c in communities
+            ]
             for community_id, subreddit_name, community_language in community_specs:
                 community = (
                     await session.execute(select(Community).where(Community.id == community_id))
@@ -372,7 +452,9 @@ async def _analyze_one(session: AsyncSession, convo: Conversation, settings: Set
     communities = (
         await session.execute(select(Community).where(Community.account_id == convo.account_id))
     ).scalars().all()
-    community = next((c for c in communities if c.name.lower() == convo.subreddit.lower()), None)
+    # subreddits_match tolerates "r/SaaS" vs "SaaS" on either side, so a
+    # community saved in display form still matches what Reddit returns.
+    community = next((c for c in communities if subreddits_match(c.name, convo.subreddit)), None)
 
     topic_matchers = []
     for t in topics:
@@ -861,6 +943,7 @@ async def run_sync_deleted_reddit_content(
         deleted = 0
         errors = 0
         external_calls = 0
+        token_refresh_failures = 0
         now = datetime.now(timezone.utc)
         for account_id in account_ids:
             await _set_account_context(session, account_id)
@@ -876,9 +959,16 @@ async def run_sync_deleted_reddit_content(
                 errors += 1
                 continue
             try:
-                access_token = decrypt_token(settings, connection.access_token_encrypted)
-            except Exception:
+                access_token = await _ensure_fresh_access_token(session, settings, connection, adapter)
+            except Exception as exc:
                 errors += 1
+                token_refresh_failures += 1
+                await session.rollback()
+                await _set_account_context(session, account_id)
+                logger.error(
+                    "reddit_deleted_sync_token_unusable account_id=%s type=%s detail=%s",
+                    account_id, type(exc).__name__, str(exc)[:200],
+                )
                 continue
             rows = (
                 await session.execute(
@@ -934,6 +1024,7 @@ async def run_sync_deleted_reddit_content(
             "external_calls": external_calls,
             "checked": checked,
             "deleted": deleted,
+            "token_refresh_failures": token_refresh_failures,
             "not_confirmed_missing_response": "true",
         }
 

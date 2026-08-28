@@ -53,7 +53,11 @@ class Settings(BaseSettings):
     reddit_api_enabled: bool = False
     reddit_client_id: str = ""
     reddit_client_secret: str = ""
-    reddit_redirect_uri: str = "http://localhost:8010/api/reddit/callback"
+    # Points at the FRONTEND route, not the API. Reddit redirects the user's
+    # browser here, and that redirect carries no Authorization header — the
+    # page reads the code/state and posts them back over an authenticated
+    # call. Must match the redirect URI registered in the Reddit app exactly.
+    reddit_redirect_uri: str = "http://localhost:5180/reddit/callback"
     reddit_user_agent: str = "radarin-conversation-radar/0.1 (internal tool)"
     reddit_token_encryption_key: str = ""
     reddit_fetch_limit: int = 50

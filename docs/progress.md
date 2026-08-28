@@ -109,7 +109,9 @@ Hallazgos y correcciones de esta fase:
    con pruebas de dos cuentas.
 6. **Afirmación corregida: la integración de Reddit "implementada" no significa "funcional al activarla".** Se
    descubrió que `fetch_reddit_conversations` y `sync_deleted_reddit_content` son stubs que no hacen nada incluso
-   con `REDDIT_API_ENABLED=true` y credenciales válidas — nunca llaman a `fetch_new_posts`. `docs/reddit-compliance.md`
+   con `REDDIT_API_ENABLED=true` y credenciales válidas — nunca llaman a `fetch_new_posts`.
+   *(Nota posterior: esto dejó de ser cierto el 2026-08-27; ambos jobs tienen implementación real desde la fase de
+   automatización. Se conserva el texto original porque este archivo es el registro histórico.)* `docs/reddit-compliance.md`
    ahora tiene una tabla de clasificación por capacidad en vez de una afirmación global de "implementado".
 7. **Afirmación corregida: el docstring de `reddit_client.py` decía que se respetaban las cabeceras
    `x-ratelimit-*`.** Falso — solo se lee `retry-after` en respuestas de error. Corregido en el código y en la
@@ -177,9 +179,9 @@ En orden de valor (ver también `docs/deployment.md` y `docs/acceptance-audit.md
 1. Ejecutar el login real contra un proyecto Supabase real (hoy probado solo con un proveedor JWT local — ver
    `docs/authentication.md` para la clasificación explícita de qué está probado contra qué) y añadir las Redirect
    URLs del dominio de producción en Supabase Auth antes de desplegar.
-2. Escribir la lógica real de `fetch_reddit_conversations` (reunir comunidades vigiladas → token de la cuenta →
-   `fetch_new_posts` por comunidad → persistir vía el mismo pipeline que la importación manual) y de
-   `sync_deleted_reddit_content` — hoy son stubs aunque se active la bandera.
+2. ~~Escribir la lógica real de `fetch_reddit_conversations` y de `sync_deleted_reddit_content`~~ — **hecho**
+   el 2026-08-27 (fase de automatización). Ambos jobs recorren las comunidades activas, paginan con watermark,
+   deduplican y persisten por el mismo pipeline que la importación manual.
 3. Solicitar acceso a la Data API de Reddit (`docs/reddit-access-request.md`) y, una vez aprobado, completar el
    punto 2 antes de activar `REDDIT_API_ENABLED`.
 4. Añadir un test que fuerce un fallo real dentro de un job para verificar que `ScheduledJobRun.error_message` se
@@ -202,3 +204,28 @@ Implementado en código, sin conexión real a Reddit:
 
 No está activado ni aprobado Reddit real. Faltan la aprobación, credenciales OAuth, redirect URI de producción, clave
 de cifrado de producción y una verificación final contra el entorno autorizado.
+
+## Fase puente OAuth Reddit (2026-08-28)
+
+Cierra los tres huecos que impedían que unas credenciales válidas bastaran para ingerir Reddit. Sin activar nada:
+`REDDIT_API_ENABLED` sigue en `false` y no se hizo ninguna llamada real a Reddit.
+
+- **Refresco de token**: `refresh_access_token` (grant `refresh_token`, una sola tentativa, sin reintentos) y
+  `_ensure_fresh_access_token`, que refresca cuando el token está expirado o le quedan menos de 5 minutos, antes de
+  `fetch_reddit_conversations` y de `sync_deleted_reddit_content`. Reddit suele omitir `refresh_token` al refrescar:
+  en ese caso se conserva el existente en lugar de sobrescribirlo con vacío. Un refresco fallido marca la ejecución
+  como `failed`, no mata worker ni scheduler, y no escribe ningún token en logs ni en mensajes de error.
+- **Callback alcanzable**: el `redirect_uri` pasa a ser la ruta del frontend `/reddit/callback`. Esa página lee
+  `code`/`state` y los envía por `POST /api/reddit/callback` autenticado; la cuenta sale de la sesión, nunca del
+  cuerpo de la petición. El `state` es aleatorio (32 bytes), se guarda ligado a la cuenta, expira a los 10 minutos y
+  es de un solo uso (se consume antes del intercambio). Tabla nueva `reddit_oauth_states` con RLS forzada
+  (migración `0006_reddit_oauth_state`).
+- **UI**: botón Conectar/Desconectar en Configuración. Desconectar desactiva la conexión y borra los tokens
+  cifrados; no toca las conversaciones ya ingeridas.
+- **Correcciones**: `max_age_hours` del perfil de vigilancia se ignoraba (`_analyze_one` recibía `None`) y ahora se
+  respeta; normalización central de subreddit (`normalize_subreddit`/`subreddits_match`) para que `SaaS`, `r/SaaS` y
+  `r/saas` sean la misma comunidad — incluido el nombre usado como segmento de la URL del listado, que con `r/`
+  habría pedido `/r/r/agency/new`.
+
+Clasificación honesta: **IMPLEMENTADO Y PROBADO CON FAKE/MOCK**. Nada de esto está **PROBADO CONTRA REDDIT REAL**.
+Sigue pendiente la aprobación de Reddit, las credenciales OAuth, una clave Fernet propia y el proveedor de email.

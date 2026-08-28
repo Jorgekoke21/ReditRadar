@@ -10,7 +10,9 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.text_utils import normalize_subreddit
 
 
 class ORMModel(BaseModel):
@@ -57,6 +59,20 @@ class CommunityIn(BaseModel):
     notes: str = ""
     rules_url: str = ""
     rules_last_reviewed_at: date | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _canonical_subreddit(cls, value: str) -> str:
+        """Store "SaaS", never "r/SaaS".
+
+        The watch-list is matched against the bare name Reddit's API returns,
+        so a stored prefix would make every post from that community fail the
+        `community_not_watched` check and be discarded before scoring.
+        """
+        canonical = normalize_subreddit(value)
+        if not canonical:
+            raise ValueError("Subreddit name cannot be empty")
+        return canonical
 
 
 class CommunityOut(ORMModel):
@@ -307,3 +323,27 @@ class DashboardOut(BaseModel):
     responded: int
     discarded: int
     last_run_at: datetime | None
+
+
+# --- Reddit OAuth -------------------------------------------------------
+class RedditConnectOut(BaseModel):
+    """`state` is echoed back so the frontend can confirm the value Reddit
+    returns is the one it started with. It is not a credential: the backend
+    re-validates it against its own account-bound row on the callback."""
+
+    authorize_url: str
+    state: str
+
+
+class RedditCallbackIn(BaseModel):
+    code: str
+    state: str
+
+
+class RedditConnectionOut(BaseModel):
+    """Deliberately carries no token field — access and refresh tokens must
+    never leave the backend, not even to the account that owns them."""
+
+    connected: bool
+    scopes: str = ""
+    token_expires_at: datetime | None = None

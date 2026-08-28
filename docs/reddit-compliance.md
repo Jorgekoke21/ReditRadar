@@ -11,7 +11,7 @@ aplicación.
 |---|---|---|
 | 1 | No scraping HTML | No hay ningún cliente HTTP apuntando a `www.reddit.com` salvo `app/services/reddit_client.py`, que solo usa `oauth.reddit.com` con un token Bearer. |
 | 2 | No Selenium/Playwright/Puppeteer para recolectar publicaciones | Ningún navegador automatizado se usa para leer Reddit. (Playwright sí se usó puntualmente durante el desarrollo para verificar visualmente *esta propia interfaz*, nunca para tocar Reddit.) |
-| 3 | No endpoints privados/no documentados | Solo se usan `/api/v1/authorize`, `/api/v1/access_token` y `/r/{subreddit}/new`, todos parte de la API pública documentada de Reddit. |
+| 3 | No endpoints privados/no documentados | Solo se usan `/api/v1/authorize`, `/api/v1/access_token` (grants `authorization_code` y `refresh_token`), `/r/{subreddit}/new` y `/api/info`, todos parte de la API pública documentada de Reddit. |
 | 4 | No publicar comentarios automáticamente | No existe ningún endpoint ni botón que publique. Ver "Botones permitidos" abajo. |
 | 5 | No votar automáticamente | No implementado, ni el scope `vote` se solicita. |
 | 6 | No mensajes privados | No implementado, ni el scope `privatemessages` se solicita. |
@@ -19,7 +19,7 @@ aplicación.
 | 8 | No entrenar modelos con contenido de Reddit | El contenido de Reddit nunca sale del par petición/respuesta hacia el proveedor de IA (cuando está activo) más que el título/cuerpo/subreddit/idioma necesarios para clasificar; no se usa para fine-tuning en ningún punto del código. |
 | 9 | No inferir características sensibles | El analizador solo extrae: tipo de audiencia (a partir del subreddit), problema, intención, tema, riesgo promocional. Nunca perfila a la persona autora. |
 | 10 | No almacenar perfiles personales innecesarios | `raw_author` es el único campo con un identificador de usuario de Reddit, y se purga a las 48h como el resto del contenido temporal (ver `docs/data-model.md`). |
-| 11 | Solo integración oficial aprobada | `reddit_client.py` implementa exclusivamente el flujo OAuth documentado (`authorization_code`, `duration=permanent`). |
+| 11 | Solo integración oficial aprobada | `reddit_client.py` implementa exclusivamente el flujo OAuth documentado (`authorization_code` con `duration=permanent`, y `refresh_token` para renovar). |
 | 12 | Integración desactivada hasta tener aprobación | `REDDIT_API_ENABLED=false` por defecto; cada función pública de `reddit_client.py` lanza `RedditIntegrationDisabled` si la bandera está apagada, sin excepción. `GET /api/reddit/connect` devuelve `403` mientras esté desactivada. |
 
 ## Clasificación por capacidad
@@ -27,7 +27,7 @@ aplicación.
 | Capacidad | Estado |
 |---|---|
 | Puerta de activación | Completa: REDDIT_API_ENABLED=false rechaza antes de HTTP. |
-| OAuth | Preparado, no probado contra Reddit real; scopes de solo lectura. |
+| OAuth | Implementado y probado con Fake/Mock (autorizacion, `state` de un solo uso ligado a la cuenta, intercambio, refresco y desconexion); no probado contra Reddit real. Scopes de solo lectura. |
 | Fetch oficial | Implementado en fetch_reddit_conversations; probado con FakeRedditClient, no con Reddit real. |
 | Paginación y watermark | Implementados; watermark persistente por comunidad evita reprocesar tras reinicio. |
 | Filtro, análisis, scoring y dedupe | Reutilizan el pipeline existente y se ejecutan antes de cualquier LLM. |
@@ -80,7 +80,7 @@ de nuevo inmediatamente antes de activar el entorno real. No se ha llamado a Red
 
 ## Estado de esta fase
 
-- OAuth: preparado; no probado contra Reddit real.
+- OAuth: implementado de extremo a extremo (conectar, callback, refresco automatico, desconectar) y probado con Fake/Mock; no probado contra Reddit real.
 - Fetch, paginación, rate limits y backoff: implementados y probados con fake; integración real bloqueada por aprobación/credenciales.
 - Cursor/watermark: implementado en communities.reddit_watermark_* y persistente ante reinicios.
 - Ingesta, dedupe, filtro, análisis, scoring y alertas: reutilizan el pipeline existente; probado con SQLite/FakeReddit.

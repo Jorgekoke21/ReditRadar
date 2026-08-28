@@ -101,30 +101,91 @@ def build_authorize_url(settings: Settings, state: str) -> str:
     return f"{REDDIT_WWW_BASE}/api/v1/authorize?{params}"
 
 
+class RedditTokenRefreshError(RedditAPIError):
+    """Raised when an access token could not be renewed.
+
+    Separate from RedditAPIError so callers can distinguish "this account's
+    Reddit authorization is broken and needs the user to reconnect" from
+    "one listing request failed and will be retried next tick".
+    """
+
+
+async def _post_token_request(settings: Settings, data: dict, *, failure: str) -> dict:
+    """Single POST to Reddit's token endpoint with no retry loop.
+
+    Deliberately not wrapped in _get_with_backoff: a token grant is not
+    idempotent in the way a listing read is, and retrying a rejected grant
+    cannot make it succeed. One attempt, then a typed error the caller
+    records and retries on the next scheduled tick.
+    """
+    try:
+        async with httpx.AsyncClient(
+            auth=(settings.reddit_client_id, settings.reddit_client_secret),
+            headers={"User-Agent": settings.reddit_user_agent},
+            timeout=15,
+        ) as client:
+            resp = await client.post(f"{REDDIT_WWW_BASE}/api/v1/access_token", data=data)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise RedditTokenRefreshError(f"{failure}: {type(exc).__name__}") from exc
+
+    if resp.status_code >= 400:
+        raise RedditTokenRefreshError(
+            f"{failure}: HTTP {resp.status_code}",
+            status_code=resp.status_code,
+            rate_limit=_rate_limit_from_headers(resp.headers),
+        )
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise RedditTokenRefreshError(f"{failure}: response was not JSON") from exc
+
+    # Reddit answers some invalid grants with HTTP 200 and an {"error": ...}
+    # body, so a 2xx alone is not proof of success.
+    if not payload.get("access_token"):
+        raise RedditTokenRefreshError(f"{failure}: response contained no access_token")
+    return payload
+
+
 async def exchange_code_for_token(settings: Settings, code: str) -> dict:
+    """Trade the one-time authorization code from the callback for tokens.
+
+    Shares _post_token_request with refresh so both grants get the same
+    timeout, non-JSON and "HTTP 200 with an error body" handling.
+    """
     _require_enabled(settings)
     if not settings.reddit_client_id or not settings.reddit_client_secret:
         raise RedditAPIError("REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are required")
-    async with httpx.AsyncClient(
-        auth=(settings.reddit_client_id, settings.reddit_client_secret),
-        headers={"User-Agent": settings.reddit_user_agent},
-        timeout=15,
-    ) as client:
-        resp = await client.post(
-            f"{REDDIT_WWW_BASE}/api/v1/access_token",
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": settings.reddit_redirect_uri,
-            },
-        )
-        if resp.status_code >= 400:
-            raise RedditAPIError(
-                f"Reddit OAuth token exchange failed with HTTP {resp.status_code}",
-                status_code=resp.status_code,
-                rate_limit=_rate_limit_from_headers(resp.headers),
-            )
-        return resp.json()
+    return await _post_token_request(
+        settings,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": settings.reddit_redirect_uri,
+        },
+        failure="Reddit OAuth token exchange failed",
+    )
+
+
+async def refresh_access_token(settings: Settings, refresh_token: str) -> dict:
+    """Exchange a refresh token for a fresh access token.
+
+    Returns the raw Reddit payload. Reddit does not always return a new
+    refresh token on refresh — when it omits one, the caller must keep the
+    existing one rather than overwriting it with an empty string, which
+    would silently make the connection unrecoverable.
+
+    No token value is ever logged or included in an exception message.
+    """
+    _require_enabled(settings)
+    if not settings.reddit_client_id or not settings.reddit_client_secret:
+        raise RedditTokenRefreshError("REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are required")
+    if not refresh_token:
+        raise RedditTokenRefreshError("No refresh token stored for this connection; reconnect Reddit")
+    return await _post_token_request(
+        settings,
+        {"grant_type": "refresh_token", "refresh_token": refresh_token},
+        failure="Reddit token refresh failed",
+    )
 
 
 async def _get_with_backoff(

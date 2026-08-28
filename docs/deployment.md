@@ -78,6 +78,6 @@ Ninguna de estas bloquea el uso en Demo/Manual — solo desbloquean funcionalida
 | Variable | Desbloquea |
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET` de un **proyecto Supabase real** | El login por magic link ya está implementado y probado con un proveedor JWT local (`docs/authentication.md`); lo único que falta para "probado con Supabase real" es un proyecto Supabase real contra el que ejecutarlo — no hay cambio de código pendiente. |
-| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_API_ENABLED=true` | Conexión OAuth (`/api/reddit/connect`). **No** desbloquea sincronización automática por sí solo: fetch_reddit_conversations está implementado, pero requiere callback OAuth, conexión activa, watermark y validación operativa — ver `docs/reddit-compliance.md`. |
+| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_API_ENABLED=true`, `REDDIT_TOKEN_ENCRYPTION_KEY` | El puente OAuth completo: Conectar desde Configuración, callback, refresco automático del token y los dos jobs de Reddit. `REDDIT_REDIRECT_URI` debe apuntar a la ruta del **frontend** `/reddit/callback` y estar registrada con ese mismo valor exacto en la app de Reddit. Sigue faltando la aprobación de Reddit y una prueba real — ver `docs/reddit-compliance.md`. |
 | `AI_API_KEY`, `AI_PROVIDER`, `AI_ANALYSIS_ENABLED=true` | Análisis vía IA en vez de (o además de) reglas. |
 | `SMTP_*` o `RESEND_API_KEY`, `EMAIL_PROVIDER=smtp`/`resend` | Envío real de los correos (hoy: bandeja de previsualización). |

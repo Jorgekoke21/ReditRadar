@@ -37,6 +37,7 @@ from app.schemas import (
 )
 from app.services import jobs as jobs_service
 from app.services.dedupe import compute_dedupe_hash, normalize_url
+from app.services.text_utils import normalize_subreddit
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -87,7 +88,9 @@ async def list_conversations(
     if min_score is not None:
         stmt = stmt.where(Conversation.score_total >= min_score)
     if subreddit:
-        stmt = stmt.where(Conversation.subreddit == subreddit)
+        # Stored values are canonical, so canonicalize the filter too — a
+        # user filtering by "r/agency" should still find r/agency's posts.
+        stmt = stmt.where(Conversation.subreddit == normalize_subreddit(subreddit))
     if topic_id:
         stmt = stmt.where(Conversation.topic_id == topic_id)
     if language:
@@ -168,6 +171,10 @@ async def _create_and_analyze(
     # but it is NEVER a clickable link, so it must never end up in the
     # user-facing `url` field (that field feeds "Abrir en Reddit" — putting a
     # fake manual:// URI there would make that button silently dead).
+    # Every ingestion path (manual, CSV, Reddit fetch) funnels through here,
+    # so this is the one place that needs to canonicalize the subreddit —
+    # doing it before the dedupe hash keeps "r/SaaS" and "SaaS" the same post.
+    subreddit = normalize_subreddit(subreddit)
     url_norm = normalize_url(url) if url else f"manual://{subreddit}/{title}"
     dedupe_hash = compute_dedupe_hash(subreddit, title, published_at, reddit_post_id)
 
@@ -204,7 +211,10 @@ async def _create_and_analyze(
             payload={"source_mode": source_mode.value},
         )
     )
-    await jobs_service._analyze_one(session, convo, settings, max_age_hours=None)
+    # Pass the caller's window through: the Reddit fetch job resolves this
+    # per community from the active watch profile, and dropping it here made
+    # every ingested post fall back to the global default instead.
+    await jobs_service._analyze_one(session, convo, settings, max_age_hours=max_age_hours)
     await session.commit()
     await session.refresh(convo)
     return convo
