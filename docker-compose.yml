@@ -1,0 +1,81 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: radarin
+      POSTGRES_PASSWORD: radarin
+      POSTGRES_DB: radarin_radar
+    ports:
+      - "5544:5432"
+    volumes:
+      - radarin_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radarin -d radarin_radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Three distinct roles, three distinct URLs — see docs/rls.md.
+      # DATABASE_URL is the fallback the SQLite test suite uses; not read here.
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://radarin:radarin@db:5432/radarin_radar
+      DATABASE_APP_URL: postgresql+asyncpg://radar_app:${RADAR_APP_DB_PASSWORD:-radar_app_dev_only_change_me}@db:5432/radarin_radar
+      RADAR_APP_DB_PASSWORD: ${RADAR_APP_DB_PASSWORD:-radar_app_dev_only_change_me}
+      RADAR_WORKER_DB_PASSWORD: ${RADAR_WORKER_DB_PASSWORD:-radar_worker_dev_only_change_me}
+    ports:
+      - "8010:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m app.seeds.demo_data &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://radarin:radarin@db:5432/radarin_radar
+      DATABASE_WORKER_URL: postgresql+asyncpg://radar_worker:${RADAR_WORKER_DB_PASSWORD:-radar_worker_dev_only_change_me}@db:5432/radarin_radar
+      RADAR_APP_DB_PASSWORD: ${RADAR_APP_DB_PASSWORD:-radar_app_dev_only_change_me}
+      RADAR_WORKER_DB_PASSWORD: ${RADAR_WORKER_DB_PASSWORD:-radar_worker_dev_only_change_me}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    # The role radar_worker connects as is created by the backend's migration
+    # step; app/worker.py retries its own connection with backoff rather than
+    # relying on container start order here.
+    command: python -m app.worker
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VITE_API_URL: http://localhost:8010
+    ports:
+      - "5180:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  radarin_db_data:

@@ -1,0 +1,7 @@
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+test_radar.db
+.pytest_cache
+.env
